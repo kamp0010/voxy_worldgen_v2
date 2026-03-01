@@ -25,8 +25,9 @@ public abstract class ChunkSaveMixin {
     private void onChunkSave(ChunkAccess chunk, CallbackInfoReturnable<Boolean> cir) {
         if (!Config.DATA.saveNormalChunks) {
             long chunkPos = chunk.getPos().toLong();
-            if (ChunkGenerationManager.getInstance().isVoxyOnlyChunk(level.dimension(), chunkPos)) {
-                ChunkGenerationManager.getInstance().incrementSaveSkipped();
+            ChunkGenerationManager manager = ChunkGenerationManager.getInstance();
+            if (manager.isVoxyOnlyChunk(level.dimension(), chunkPos)) {
+                manager.incrementSaveSkipped();
                 cir.setReturnValue(true);
             }
         }

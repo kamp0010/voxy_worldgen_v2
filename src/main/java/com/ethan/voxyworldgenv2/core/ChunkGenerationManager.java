@@ -71,6 +71,7 @@ public final class ChunkGenerationManager {
     private ResourceKey<Level> currentDimensionKey = null;
     private ServerLevel currentLevel = null;
     private final java.util.Map<java.util.UUID, ChunkPos> lastPlayerPositions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<java.util.UUID, ResourceKey<Level>> lastPlayerDimensions = new java.util.concurrent.ConcurrentHashMap<>();
     private java.util.function.BooleanSupplier pauseCheck = () -> false;
 
     // worker
@@ -380,12 +381,20 @@ public final class ChunkGenerationManager {
         
         for (ServerPlayer player : players) {
             levelCounts.merge((ServerLevel) player.level(), 1, Integer::sum);
+            java.util.UUID playerId = player.getUUID();
             ChunkPos currentPos = player.chunkPosition();
-            ChunkPos lastPos = lastPlayerPositions.get(player.getUUID());
-            
-            if (lastPos == null || distSq(lastPos, currentPos) >= 4) {
-                lastPlayerPositions.put(player.getUUID(), currentPos);
+            ChunkPos lastPos = lastPlayerPositions.get(playerId);
+            ResourceKey<Level> currentDim = player.level().dimension();
+            ResourceKey<Level> lastDim = lastPlayerDimensions.get(playerId);
+            boolean dimensionChanged = lastDim != null && !lastDim.equals(currentDim);
+            boolean chunkChanged = lastPos == null || !lastPos.equals(currentPos);
+
+            if (chunkChanged || dimensionChanged) {
+                lastPlayerPositions.put(playerId, currentPos);
+                lastPlayerDimensions.put(playerId, currentDim);
                 claimPlayerViewDistance(player);
+            }
+            if (lastPos == null || dimensionChanged || distSq(lastPos, currentPos) >= 4) {
                 shouldRescan = true;
             }
         }
@@ -411,6 +420,7 @@ public final class ChunkGenerationManager {
         for (ServerPlayer p : players) currentPlayerIds.add(p.getUUID());
         if (lastPlayerPositions.size() > currentPlayerIds.size()) {
             lastPlayerPositions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
+            lastPlayerDimensions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
             shouldRescan = true;
         }
 
@@ -428,8 +438,7 @@ public final class ChunkGenerationManager {
     private void claimPlayerViewDistance(ServerPlayer player) {
         if (Config.DATA.saveNormalChunks) return;
 
-        DimensionState state = dimensionStates.get(player.level().dimension());
-        if (state == null) return;
+        DimensionState state = getOrSetupState((ServerLevel) player.level());
 
         int viewDist = server.getPlayerList().getViewDistance();
         ChunkPos playerChunk = player.chunkPosition();
