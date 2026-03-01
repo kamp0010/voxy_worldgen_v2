@@ -133,6 +133,7 @@ public final class ChunkGenerationManager {
         currentDimensionKey = null;
         currentLevel = null;
         lastPlayerPositions.clear();
+        lastPlayerDimensions.clear();
     }
 
     private void startWorker() {
@@ -348,8 +349,16 @@ public final class ChunkGenerationManager {
         processPendingTickets();
         
         if (configReloadScheduled.compareAndSet(true, false)) {
+            boolean wasSaveNormal = Config.DATA.saveNormalChunks;
             Config.load();
             updateThrottleCapacity();
+            
+            if (wasSaveNormal && !Config.DATA.saveNormalChunks) {
+                for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
+                    claimPlayerViewDistance(player);
+                }
+            }
+            
             restartScan();
         }
         
@@ -372,6 +381,7 @@ public final class ChunkGenerationManager {
         if (players.isEmpty()) {
             if (!lastPlayerPositions.isEmpty()) {
                 lastPlayerPositions.clear();
+                lastPlayerDimensions.clear();
             }
             return;
         }
