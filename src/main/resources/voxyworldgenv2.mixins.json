@@ -9,7 +9,8 @@
     "MinecraftServerAccess",
     "ServerChunkCacheMixin",
     "ServerLevelMixin",
-    "BlockUpdateMixin"
+    "BlockUpdateMixin",
+    "ChunkSaveMixin"
   ],
   "client": [],
   "injectors": {

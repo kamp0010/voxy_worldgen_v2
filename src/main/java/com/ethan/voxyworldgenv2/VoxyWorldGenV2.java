@@ -18,6 +18,15 @@ public class VoxyWorldGenV2 implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("voxy world gen v2 initializing");
         com.ethan.voxyworldgenv2.core.Config.load();
+
+        if (!com.ethan.voxyworldgenv2.core.Config.DATA.saveNormalChunks) {
+            LOGGER.warn("========================================");
+            LOGGER.warn("saveNormalChunks is DISABLED");
+            LOGGER.warn("Only LOD-only chunks will skip saving");
+            LOGGER.warn("Player-visited chunks WILL be saved");
+            LOGGER.warn("========================================");
+        }
+
         NetworkHandler.init();
         
         // server lifecycle events

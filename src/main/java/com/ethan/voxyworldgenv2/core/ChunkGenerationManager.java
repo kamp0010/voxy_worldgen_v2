@@ -46,6 +46,7 @@ public final class ChunkGenerationManager {
         final DistanceGraph distanceGraph = new DistanceGraph();
         final Set<Long> trackedBatches = ConcurrentHashMap.newKeySet();
         final Map<Long, AtomicInteger> batchCounters = new ConcurrentHashMap<>();
+        final LongSet playerClaimedChunks = LongSets.synchronize(new LongOpenHashSet());
         final AtomicInteger remainingInRadius = new AtomicInteger(0);
         boolean tellusActive = false;
         boolean loaded = false;
@@ -119,6 +120,7 @@ public final class ChunkGenerationManager {
             if (state.loaded) {
                 ChunkPersistence.save(state.level, entry.getKey(), state.completedChunks);
             }
+            state.playerClaimedChunks.clear();
         }
         
         dimensionStates.clear();
@@ -383,6 +385,7 @@ public final class ChunkGenerationManager {
             
             if (lastPos == null || distSq(lastPos, currentPos) >= 4) {
                 lastPlayerPositions.put(player.getUUID(), currentPos);
+                claimPlayerViewDistance(player);
                 shouldRescan = true;
             }
         }
@@ -420,6 +423,22 @@ public final class ChunkGenerationManager {
         int dx = a.x - b.x;
         int dz = a.z - b.z;
         return (double) dx * dx + dz * dz;
+    }
+
+    private void claimPlayerViewDistance(ServerPlayer player) {
+        if (Config.DATA.saveNormalChunks) return;
+
+        DimensionState state = dimensionStates.get(player.level().dimension());
+        if (state == null) return;
+
+        int viewDist = server.getPlayerList().getViewDistance();
+        ChunkPos playerChunk = player.chunkPosition();
+
+        for (int dx = -viewDist; dx <= viewDist; dx++) {
+            for (int dz = -viewDist; dz <= viewDist; dz++) {
+                state.playerClaimedChunks.add(ChunkPos.asLong(playerChunk.x + dx, playerChunk.z + dz));
+            }
+        }
     }
 
     private void setupLevel(ServerLevel newLevel) {
@@ -554,6 +573,16 @@ public final class ChunkGenerationManager {
     }
     public boolean isThrottled() { return tpsMonitor.isThrottled(); }
     public int getQueueSize() { return 0; }
+
+    public boolean isVoxyOnlyChunk(ResourceKey<Level> dimension, long chunkPos) {
+        DimensionState state = dimensionStates.get(dimension);
+        if (state == null) return false;
+        return state.completedChunks.contains(chunkPos) && !state.playerClaimedChunks.contains(chunkPos);
+    }
+
+    public void incrementSaveSkipped() {
+        stats.incrementSaveSkipped();
+    }
     
     public void setPauseCheck(java.util.function.BooleanSupplier check) {
         this.pauseCheck = check;

@@ -54,6 +54,12 @@ public class ModMenuIntegration implements ModMenuApi {
                 .setTooltip(Component.translatable("config.voxyworldgenv2.option.max_active.tooltip"))
                 .setSaveConsumer(newValue -> Config.DATA.maxActiveTasks = newValue)
                 .build());
+
+            general.addEntry(entryBuilder.startBooleanToggle(Component.translatable("config.voxyworldgenv2.option.save_normal_chunks"), Config.DATA.saveNormalChunks)
+                .setDefaultValue(true)
+                .setTooltip(Component.translatable("config.voxyworldgenv2.option.save_normal_chunks.tooltip"))
+                .setSaveConsumer(newValue -> Config.DATA.saveNormalChunks = newValue)
+                .build());
             
             builder.setSavingRunnable(() -> {
                 Config.save();

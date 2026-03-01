@@ -7,6 +7,7 @@ public class GenerationStats {
     private final AtomicLong chunksCompleted = new AtomicLong(0);
     private final AtomicLong chunksFailed = new AtomicLong(0);
     private final AtomicLong chunksSkipped = new AtomicLong(0);
+    private final AtomicLong chunksSaveSkipped = new AtomicLong(0);
     
     // rolling average over 10s
     private final long[] rollingHistory = new long[10];
@@ -18,11 +19,13 @@ public class GenerationStats {
     public void incrementCompleted() { chunksCompleted.incrementAndGet(); }
     public void incrementFailed() { chunksFailed.incrementAndGet(); }
     public void incrementSkipped() { chunksSkipped.incrementAndGet(); }
+    public void incrementSaveSkipped() { chunksSaveSkipped.incrementAndGet(); }
     
     public long getQueued() { return chunksQueued.get(); }
     public long getCompleted() { return chunksCompleted.get(); }
     public long getFailed() { return chunksFailed.get(); }
     public long getSkipped() { return chunksSkipped.get(); }
+    public long getSaveSkipped() { return chunksSaveSkipped.get(); }
     
     // update rolling average, call every tick
     public synchronized void tick() {
@@ -66,6 +69,7 @@ public class GenerationStats {
         chunksCompleted.set(0);
         chunksFailed.set(0);
         chunksSkipped.set(0);
+        chunksSaveSkipped.set(0);
         synchronized (this) {
             for (int i = 0; i < rollingHistory.length; i++) rollingHistory[i] = 0;
             lastCompletedCount = 0;

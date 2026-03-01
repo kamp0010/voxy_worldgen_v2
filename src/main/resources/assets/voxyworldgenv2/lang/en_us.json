@@ -13,5 +13,7 @@
     "config.voxyworldgenv2.option.max_queue.tooltip": "Maximum number of chunks to keep in the pending queue.",
     "config.voxyworldgenv2.option.max_active": "Max Parallel Tasks",
     "config.voxyworldgenv2.option.max_active.tooltip": "Maximum number of chunks generating simultaneously.",
+    "config.voxyworldgenv2.option.save_normal_chunks": "Save Normal Chunks",
+    "config.voxyworldgenv2.option.save_normal_chunks.tooltip": "When disabled, chunks generated only for Voxy LOD will not be saved to region files. Player-visited chunks are always saved. Reduces disk usage significantly.",
     "debug.voxyworldgenv2.skipped": "skipped"
 }

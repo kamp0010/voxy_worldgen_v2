@@ -64,6 +64,9 @@ public final class DebugRenderer {
             lineList.add("§6[voxy worldgen v2] " + status);
             lineList.add("§7completed: §a" + formatNumber(stats.getCompleted()));
             lineList.add("§7skipped: §f" + formatNumber(stats.getSkipped()));
+            if (!com.ethan.voxyworldgenv2.core.Config.DATA.saveNormalChunks) {
+                lineList.add("§7saves skipped: §c" + formatNumber(stats.getSaveSkipped()));
+            }
             lineList.add("§7remaining: §e" + formatNumber(remaining) + " §8(" + eta + ")");
             lineList.add("§7active: §b" + manager.getActiveTaskCount());
             lineList.add("§7rate: §f" + String.format("%.1f", rate) + " c/s");
