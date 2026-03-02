@@ -10,7 +10,8 @@
     "ServerChunkCacheMixin",
     "ServerLevelMixin",
     "BlockUpdateMixin",
-    "ChunkSaveMixin"
+    "ChunkSaveMixin",
+    "ChunkAccessUnsavedMixin"
   ],
   "client": [],
   "injectors": {
