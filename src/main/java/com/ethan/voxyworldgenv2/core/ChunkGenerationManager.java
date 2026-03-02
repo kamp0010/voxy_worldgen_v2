@@ -3,6 +3,7 @@ package com.ethan.voxyworldgenv2.core;
 import com.ethan.voxyworldgenv2.VoxyWorldGenV2;
 import com.ethan.voxyworldgenv2.integration.VoxyIntegration;
 import com.ethan.voxyworldgenv2.integration.tellus.TellusIntegration;
+import com.ethan.voxyworldgenv2.core.LodChunkTracker;
 import com.ethan.voxyworldgenv2.mixin.MinecraftServerAccess;
 
 import com.ethan.voxyworldgenv2.mixin.ServerChunkCacheMixin;
@@ -46,7 +47,6 @@ public final class ChunkGenerationManager {
         final DistanceGraph distanceGraph = new DistanceGraph();
         final Set<Long> trackedBatches = ConcurrentHashMap.newKeySet();
         final Map<Long, AtomicInteger> batchCounters = new ConcurrentHashMap<>();
-        final LongSet playerClaimedChunks = LongSets.synchronize(new LongOpenHashSet());
         final AtomicInteger remainingInRadius = new AtomicInteger(0);
         boolean tellusActive = false;
         boolean loaded = false;
@@ -115,13 +115,13 @@ public final class ChunkGenerationManager {
         running.set(false);
         stopWorker();
         TellusIntegration.shutdown();
+        LodChunkTracker.getInstance().clearAll();
         
         for (var entry : dimensionStates.entrySet()) {
             DimensionState state = entry.getValue();
             if (state.loaded) {
                 ChunkPersistence.save(state.level, entry.getKey(), state.completedChunks);
             }
-            state.playerClaimedChunks.clear();
         }
         
         dimensionStates.clear();
@@ -320,6 +320,9 @@ public final class ChunkGenerationManager {
                                         if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
                                             onSuccess(finalState, pos);
                                             if (!chunk.isEmpty()) {
+                                                if (!Config.DATA.saveNormalChunks) {
+                                                    LodChunkTracker.getInstance().markLod(finalState.level.dimension(), pos.toLong());
+                                                }
                                                 VoxyIntegration.ingestChunk(chunk);
                                                 com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
                                             }
@@ -349,16 +352,8 @@ public final class ChunkGenerationManager {
         processPendingTickets();
         
         if (configReloadScheduled.compareAndSet(true, false)) {
-            boolean wasSaveNormal = Config.DATA.saveNormalChunks;
             Config.load();
             updateThrottleCapacity();
-            
-            if (wasSaveNormal && !Config.DATA.saveNormalChunks) {
-                for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
-                    claimPlayerViewDistance(player);
-                }
-            }
-            
             restartScan();
         }
         
@@ -402,7 +397,6 @@ public final class ChunkGenerationManager {
             if (chunkChanged || dimensionChanged) {
                 lastPlayerPositions.put(playerId, currentPos);
                 lastPlayerDimensions.put(playerId, currentDim);
-                claimPlayerViewDistance(player);
             }
             if (lastPos == null || dimensionChanged || distSq(lastPos, currentPos) >= 4) {
                 shouldRescan = true;
@@ -445,20 +439,7 @@ public final class ChunkGenerationManager {
         return (double) dx * dx + dz * dz;
     }
 
-    private void claimPlayerViewDistance(ServerPlayer player) {
-        if (Config.DATA.saveNormalChunks) return;
-
-        DimensionState state = getOrSetupState((ServerLevel) player.level());
-
-        int viewDist = server.getPlayerList().getViewDistance();
-        ChunkPos playerChunk = player.chunkPosition();
-
-        for (int dx = -viewDist; dx <= viewDist; dx++) {
-            for (int dz = -viewDist; dz <= viewDist; dz++) {
-                state.playerClaimedChunks.add(ChunkPos.asLong(playerChunk.x + dx, playerChunk.z + dz));
-            }
-        }
-    }
+    
 
     private void setupLevel(ServerLevel newLevel) {
         if (currentLevel != null && currentDimensionKey != null) {
@@ -593,15 +574,7 @@ public final class ChunkGenerationManager {
     public boolean isThrottled() { return tpsMonitor.isThrottled(); }
     public int getQueueSize() { return 0; }
 
-    public boolean isVoxyOnlyChunk(ResourceKey<Level> dimension, long chunkPos) {
-        DimensionState state = dimensionStates.get(dimension);
-        if (state == null) return false;
-        return state.completedChunks.contains(chunkPos) && !state.playerClaimedChunks.contains(chunkPos);
-    }
 
-    public void incrementSaveSkipped() {
-        stats.incrementSaveSkipped();
-    }
     
     public void setPauseCheck(java.util.function.BooleanSupplier check) {
         this.pauseCheck = check;
