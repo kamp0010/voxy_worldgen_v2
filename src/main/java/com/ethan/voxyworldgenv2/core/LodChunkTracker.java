@@ -2,7 +2,6 @@ package com.ethan.voxyworldgenv2.core;
 
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
-import java.util.Set;
 import it.unimi.dsi.fastutil.longs.LongSets;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
@@ -21,8 +20,6 @@ public final class LodChunkTracker {
     // per-dimension set of packed ChunkPos longs that are LOD-only this session
     private final Map<ResourceKey<Level>, LongSet> lodChunks = new ConcurrentHashMap<>();
     private final AtomicLong savedSkipCount = new AtomicLong(0);
-    // per-dimension set to avoid double-counting if mixin fires more than once per chunk
-    private final Map<ResourceKey<Level>, Set<Long>> skippedChunks = new ConcurrentHashMap<>();
 
     private LodChunkTracker() {}
 
@@ -51,18 +48,6 @@ public final class LodChunkTracker {
         savedSkipCount.incrementAndGet();
     }
 
-    /**
-     * Increments the skip counter only the first time a given chunk position is
-     * reported — prevents inflation if ChunkMap.save fires multiple times for
-     * the same LOD chunk across autosave cycles.
-     */
-    public void incrementSkipped(ResourceKey<Level> dim, long packedPos) {
-        Set<Long> seen = skippedChunks.computeIfAbsent(dim, k -> ConcurrentHashMap.newKeySet());
-        if (seen.add(packedPos)) {
-            savedSkipCount.incrementAndGet();
-        }
-    }
-
     public long getSkippedSaveCount() {
         return savedSkipCount.get();
     }
@@ -70,7 +55,6 @@ public final class LodChunkTracker {
     /** Call on server shutdown to release all memory. */
     public void clearAll() {
         lodChunks.clear();
-        skippedChunks.clear();
         savedSkipCount.set(0);
     }
 }

@@ -46,8 +46,10 @@ public abstract class ChunkSaveMixin {
             return;
         }
 
-        // no player nearby — suppress this save and record the chunk (once) in the counter
-        tracker.incrementSkipped(this.level.dimension(), pos.toLong());
-        cir.setReturnValue(false);
+        // no player nearby — clear dirty flag so C2ME also skips writing, then suppress
+        tracker.unmark(this.level.dimension(), pos.toLong());
+        ((com.ethan.voxyworldgenv2.mixin.ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+        // return true = "handled" so Minecraft evicts the chunk instead of retrying forever
+        cir.setReturnValue(true);
     }
 }
