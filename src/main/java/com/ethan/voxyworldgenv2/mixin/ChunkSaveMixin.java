@@ -49,7 +49,8 @@ public abstract class ChunkSaveMixin {
         // no player nearby — clear dirty flag so C2ME also skips writing, then suppress
         tracker.unmark(this.level.dimension(), pos.toLong());
         ((com.ethan.voxyworldgenv2.mixin.ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
-        // return true = "handled" so Minecraft evicts the chunk instead of retrying forever
-        cir.setReturnValue(true);
+        // return false to correctly indicate to ChunkMap that the chunk was not saved to disk.
+        // Calling setUnsaved(false) above already ensures that Minecraft won't keep retrying.
+        cir.setReturnValue(false);
     }
 }
