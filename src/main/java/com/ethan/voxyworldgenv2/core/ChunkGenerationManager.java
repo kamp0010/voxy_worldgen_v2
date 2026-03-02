@@ -321,7 +321,10 @@ public final class ChunkGenerationManager {
                                             onSuccess(finalState, pos);
                                             if (!chunk.isEmpty()) {
                                                 if (!Config.DATA.saveNormalChunks) {
-                                                    LodChunkTracker.getInstance().markLod(finalState.level.dimension(), pos.toLong());
+                                                    LodChunkTracker tracker = LodChunkTracker.getInstance();
+                                                    tracker.markLod(finalState.level.dimension(), pos.toLong());
+                                                    ((com.ethan.voxyworldgenv2.mixin.ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+                                                    tracker.incrementSkipped();
                                                 }
                                                 VoxyIntegration.ingestChunk(chunk);
                                                 com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
@@ -578,5 +581,26 @@ public final class ChunkGenerationManager {
     
     public void setPauseCheck(java.util.function.BooleanSupplier check) {
         this.pauseCheck = check;
+    }
+
+    /**
+     * Thread-safe player proximity check using the ConcurrentHashMaps
+     * updated each tick. Safe to call from C2ME storage threads.
+     */
+    public boolean isAnyPlayerNear(ResourceKey<Level> dim, ChunkPos pos) {
+        var srv = this.server;
+        int viewDist = srv != null
+            ? srv.getPlayerList().getViewDistance() + 2
+            : 10;
+        for (var entry : lastPlayerPositions.entrySet()) {
+            ResourceKey<Level> playerDim = lastPlayerDimensions.get(entry.getKey());
+            if (!dim.equals(playerDim)) continue;
+            ChunkPos playerPos = entry.getValue();
+            if (Math.abs(playerPos.x - pos.x) <= viewDist
+                    && Math.abs(playerPos.z - pos.z) <= viewDist) {
+                return true;
+            }
+        }
+        return false;
     }
 }

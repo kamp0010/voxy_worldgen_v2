@@ -66,7 +66,7 @@ public final class DebugRenderer {
             lineList.add("§7skipped: §f" + formatNumber(stats.getSkipped()));
             if (!com.ethan.voxyworldgenv2.core.Config.DATA.saveNormalChunks) {
                 long skipped = com.ethan.voxyworldgenv2.core.LodChunkTracker.getInstance().getSkippedSaveCount();
-                lineList.add("§7saves skipped: §c" + formatNumber(skipped));
+                lineList.add("§7lod suppressed: §6" + formatNumber(skipped));
             }
             lineList.add("§7remaining: §e" + formatNumber(remaining) + " §8(" + eta + ")");
             lineList.add("§7active: §b" + manager.getActiveTaskCount());
