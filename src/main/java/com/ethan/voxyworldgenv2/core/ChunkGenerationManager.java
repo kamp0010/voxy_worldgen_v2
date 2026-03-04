@@ -59,10 +59,16 @@ public final class ChunkGenerationManager {
     private final Map<ResourceKey<Level>, DimensionState> dimensionStates = new ConcurrentHashMap<>();
     
     // global state
+    // Tracks how many server.execute() generation batches are in-flight.
+    // Used to prevent flooding the server executor queue.
+    private final AtomicInteger pendingServerBatches = new AtomicInteger(0);
+    private final AtomicInteger pendingSyncBatches = new AtomicInteger(0);
     private final AtomicInteger activeTaskCount = new AtomicInteger(0);
     private final GenerationStats stats = new GenerationStats();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean configReloadScheduled = new AtomicBoolean(false);
+    private int saveTickCounter = 0;
+    private static final int SAVE_INTERVAL_TICKS = 1200;
     
     // components
     private final TpsMonitor tpsMonitor = new TpsMonitor();
@@ -72,6 +78,7 @@ public final class ChunkGenerationManager {
     private ServerLevel currentLevel = null;
     private final java.util.Map<java.util.UUID, ChunkPos> lastPlayerPositions = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<java.util.UUID, ResourceKey<Level>> lastPlayerDimensions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<java.util.UUID, ChunkPos> lastScanPositions = new java.util.concurrent.ConcurrentHashMap<>();
     private java.util.function.BooleanSupplier pauseCheck = () -> false;
 
     // worker
@@ -103,37 +110,63 @@ public final class ChunkGenerationManager {
     public void initialize(MinecraftServer server) {
         this.server = server;
         this.running.set(true);
-        // unpaused by default
-        this.pauseCheck = () -> false; 
+        this.pauseCheck = () -> false;
+        // Reset LOD tracker for this session. Must be here (not in shutdown) so
+        // the tracker stays alive through the previous session's async chunk unload.
+        LodChunkTracker.getInstance().clearAll();
         Config.load();
         this.throttle = new Semaphore(Config.DATA.maxActiveTasks);
+        pendingServerBatches.set(0);
+        pendingSyncBatches.set(0);
+        saveTickCounter = 0;
         startWorker();
         VoxyWorldGenV2.LOGGER.info("voxy world gen initialized");
     }
     
     public void shutdown() {
         running.set(false);
-        stopWorker();
+        stopWorker();  // joins worker thread, no more dispatches after this
         TellusIntegration.shutdown();
-        LodChunkTracker.getInstance().clearAll();
-        
+
+        // Force-queue ticket removes for every chunk still being tracked.
+        // The worker is already stopped so trackedChunks won't change concurrently.
+        for (DimensionState state : dimensionStates.values()) {
+            // Snapshot to a plain array to avoid iterator issues on the synchronized set.
+            long[] tracked = state.trackedChunks.toLongArray();
+            for (long packed : tracked) {
+                queueTicketRemove(state.level, new ChunkPos(packed));
+            }
+        }
+        // Drain ALL pending ticket ops (both adds queued during generation AND the
+        // removes we just enqueued). This calls removeTicketWithRadius + distance
+        // manager update so those chunks become eligible to unload normally.
+        // Must run before we clear dimensionStates so level references are valid.
+        processPendingTickets();
+
+        // Save binary caches for all dimensions that were set up this session.
         for (var entry : dimensionStates.entrySet()) {
             DimensionState state = entry.getValue();
             if (state.loaded) {
                 ChunkPersistence.save(state.level, entry.getKey(), state.completedChunks);
             }
         }
-        
+
         dimensionStates.clear();
-        pendingTicketOps.clear();
+        pendingTicketOps.clear();  // should already be empty; clear for safety
         server = null;
         stats.reset();
         activeTaskCount.set(0);
+        pendingServerBatches.set(0);
         tpsMonitor.reset();
         currentDimensionKey = null;
         currentLevel = null;
         lastPlayerPositions.clear();
         lastPlayerDimensions.clear();
+        lastScanPositions.clear();
+        // NOTE: LodChunkTracker.clearAll() is intentionally NOT called here.
+        // The tracker must remain populated so ChunkSaveMixin can suppress saves
+        // for LOD-only chunks during the async unload phase that follows shutdown.
+        // clearAll() is called at the start of initialize() for the next session.
     }
 
     private void startWorker() {
@@ -166,7 +199,14 @@ public final class ChunkGenerationManager {
                 }
 
                 if (tpsMonitor.isThrottled() || pauseCheck.getAsBoolean()) {
-                    Thread.sleep(500);
+                    // Wait for existing in-flight tasks to complete before dispatching more,
+                    // so we don't keep adding to an already-overloaded server executor queue.
+                    int waited = 0;
+                    while ((tpsMonitor.isThrottled() || activeTaskCount.get() > 0)
+                            && workerRunning.get() && waited < 60) {
+                        Thread.sleep(500);
+                        waited++;
+                    }
                     continue;
                 }
                 
@@ -193,32 +233,42 @@ public final class ChunkGenerationManager {
                 if (batch == null) {
                     // if no generation work, try to catch up on syncing for any player
                     boolean workDispatched = false;
-                    for (ServerPlayer player : players) {
-                        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
-                        if (synced == null) continue;
-                        
-                        DimensionState ds = getOrSetupState((ServerLevel) player.level());
-                        int radius = ds.tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
-                        List<ChunkPos> syncBatch = new ArrayList<>();
-                        ds.distanceGraph.collectCompletedInRange(player.chunkPosition(), radius, synced, syncBatch, 64);
-                        
-                        if (!syncBatch.isEmpty()) {
-                            workDispatched = true;
-                            final List<ChunkPos> finalSyncBatch = new ArrayList<>(syncBatch);
-                            final ServerLevel level = ds.level;
-                            final UUID playerUUID = player.getUUID();
-                            server.execute(() -> {
-                                ServerPlayer p = server.getPlayerList().getPlayer(playerUUID);
-                                if (p != null) {
-                                    for (ChunkPos syncPos : finalSyncBatch) {
-                                        LevelChunk c = level.getChunkSource().getChunk(syncPos.x, syncPos.z, false);
-                                        if (c != null) {
-                                            com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(p, c);
+                    if (pendingSyncBatches.get() < 2) {
+                        for (ServerPlayer player : players) {
+                            var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+                            if (synced == null) continue;
+                            
+                            DimensionState ds = getOrSetupState((ServerLevel) player.level());
+                            int radius = ds.tellusActive ? Math.max(Config.DATA.generationRadius, 128) : Config.DATA.generationRadius;
+                            List<ChunkPos> syncBatch = new ArrayList<>();
+                            ds.distanceGraph.collectCompletedInRange(player.chunkPosition(), radius, synced, syncBatch, 64);
+                            
+                            if (!syncBatch.isEmpty()) {
+                                workDispatched = true;
+                                final List<ChunkPos> finalSyncBatch = new ArrayList<>(syncBatch);
+                                final ServerLevel level = ds.level;
+                                final UUID playerUUID = player.getUUID();
+                                final MinecraftServer syncSrv = server;
+                                if (syncSrv == null) break;
+                                
+                                pendingSyncBatches.incrementAndGet();
+                                syncSrv.execute(() -> {
+                                    try {
+                                        ServerPlayer p = syncSrv.getPlayerList().getPlayer(playerUUID);
+                                        if (p != null) {
+                                            for (ChunkPos syncPos : finalSyncBatch) {
+                                                LevelChunk c = level.getChunkSource().getChunk(syncPos.x, syncPos.z, false);
+                                                if (c != null) {
+                                                    com.ethan.voxyworldgenv2.network.NetworkHandler.sendLODData(p, c);
+                                                }
+                                            }
                                         }
+                                    } finally {
+                                        pendingSyncBatches.decrementAndGet();
                                     }
-                                }
-                            });
-                            break; // processed one player, break to skip sleep
+                                });
+                                break; // processed one player, break to skip sleep
+                            }
                         }
                     }
                     
@@ -291,50 +341,78 @@ public final class ChunkGenerationManager {
                 }
 
                 if (!readyToGenerate.isEmpty()) {
-                    server.execute(() -> {
-                        ServerChunkCache cache = finalState.level.getChunkSource();
-                        List<ChunkPos> actuallyGenerate = new ArrayList<>();
-                        
+                    final MinecraftServer srv = server;
+                    if (srv == null) {
                         for (ChunkPos pos : readyToGenerate) {
-                            if (finalState.level.hasChunk(pos.x, pos.z)) {
-                                LevelChunk existingChunk = finalState.level.getChunk(pos.x, pos.z);
-                                if (existingChunk != null && !existingChunk.isEmpty()) {
-                                    VoxyIntegration.ingestChunk(existingChunk);
-                                    com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(existingChunk);
-                                }
-                                onSuccess(finalState, pos);
-                                completeTask(finalState, pos);
-                            } else {
-                                queueTicketAdd(finalState.level, pos);
-                                actuallyGenerate.add(pos);
-                            }
+                            onFailure(finalState, pos);
+                            completeTask(finalState, pos);
                         }
-                        
-                        if (!actuallyGenerate.isEmpty()) {
-                            // apply tickets immediately to ensure DistanceManager is aware of them, keeps stuff nice and clean
-                            processPendingTickets();
+                        finalState.trackedBatches.remove(batchKey);
+                        finalState.batchCounters.remove(batchKey);
+                        continue;
+                    }
 
-                            for (ChunkPos pos : actuallyGenerate) {
-                                ((ServerChunkCacheMixin) cache).invokeGetChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true)
-                                    .whenCompleteAsync((result, throwable) -> {
-                                        if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
-                                            onSuccess(finalState, pos);
-                                            if (!chunk.isEmpty()) {
-                                                if (!Config.DATA.saveNormalChunks) {
-                                                    LodChunkTracker tracker = LodChunkTracker.getInstance();
-                                                    tracker.markLod(finalState.level.dimension(), pos.toLong());
-                                                    ((com.ethan.voxyworldgenv2.mixin.ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
-                                                    tracker.incrementSkipped();
-                                                }
-                                                VoxyIntegration.ingestChunk(chunk);
-                                                com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
-                                            }
-                                        } else {
-                                            onFailure(finalState, pos);
-                                        }
-                                        cleanupTask(finalState.level, pos);
-                                    }, server);
+                    // Backpressure: don't let the server executor queue grow unbounded.
+                    int waited = 0;
+                    while (pendingServerBatches.get() > Config.DATA.maxActiveTasks
+                            && workerRunning.get() && waited < 20) {
+                        try { Thread.sleep(50); } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt(); break;
+                        }
+                        waited++;
+                    }
+
+                    pendingServerBatches.incrementAndGet();
+                    srv.execute(() -> {
+                        try {
+                            ServerChunkCache cache = finalState.level.getChunkSource();
+                            List<ChunkPos> actuallyGenerate = new ArrayList<>();
+                            
+                            for (ChunkPos pos : readyToGenerate) {
+                                if (finalState.level.hasChunk(pos.x, pos.z)) {
+                                    LevelChunk existingChunk = finalState.level.getChunk(pos.x, pos.z);
+                                    if (existingChunk != null && !existingChunk.isEmpty()) {
+                                        VoxyIntegration.ingestChunk(existingChunk);
+                                        com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(existingChunk);
+                                    }
+                                    onSuccess(finalState, pos);
+                                    completeTask(finalState, pos);
+                                } else {
+                                    queueTicketAdd(finalState.level, pos);
+                                    actuallyGenerate.add(pos);
+                                }
                             }
+                            
+                            if (!actuallyGenerate.isEmpty()) {
+                                processPendingTickets();
+
+                                for (ChunkPos pos : actuallyGenerate) {
+                                    ((ServerChunkCacheMixin) cache).invokeGetChunkFutureMainThread(pos.x, pos.z, ChunkStatus.FULL, true)
+                                        .whenCompleteAsync((result, throwable) -> {
+                                            try {
+                                                if (throwable == null && result != null && result.isSuccess() && result.orElse(null) instanceof LevelChunk chunk) {
+                                                    if (!chunk.isEmpty()) {
+                                                        if (!Config.DATA.saveNormalChunks) {
+                                                            LodChunkTracker tracker = LodChunkTracker.getInstance();
+                                                            tracker.markLod(finalState.level.dimension(), pos.toLong());
+                                                            ((com.ethan.voxyworldgenv2.mixin.ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+                                                            tracker.incrementSkipped();
+                                                        }
+                                                        VoxyIntegration.ingestChunk(chunk);
+                                                        com.ethan.voxyworldgenv2.network.NetworkHandler.broadcastLODData(chunk);
+                                                    }
+                                                    onSuccess(finalState, pos);
+                                                } else {
+                                                    onFailure(finalState, pos);
+                                                }
+                                            } finally {
+                                                cleanupTask(finalState.level, pos);
+                                            }
+                                        }, srv);
+                                }
+                            }
+                        } finally {
+                            pendingServerBatches.decrementAndGet();
                         }
                     });
                 }
@@ -364,6 +442,18 @@ public final class ChunkGenerationManager {
         stats.tick();
         checkPlayerMovement();
         
+        // periodic save of completed chunks to survive crashes
+        saveTickCounter++;
+        if (saveTickCounter >= SAVE_INTERVAL_TICKS) {
+            saveTickCounter = 0;
+            for (var entry : dimensionStates.entrySet()) {
+                DimensionState state = entry.getValue();
+                if (state.loaded) {
+                    ChunkPersistence.save(state.level, entry.getKey(), state.completedChunks);
+                }
+            }
+        }
+        
         // broadcast changes for all active dimensions
         Set<ServerLevel> activeLevels = new HashSet<>();
         for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
@@ -380,6 +470,7 @@ public final class ChunkGenerationManager {
             if (!lastPlayerPositions.isEmpty()) {
                 lastPlayerPositions.clear();
                 lastPlayerDimensions.clear();
+                lastScanPositions.clear();
             }
             return;
         }
@@ -391,17 +482,16 @@ public final class ChunkGenerationManager {
             levelCounts.merge((ServerLevel) player.level(), 1, Integer::sum);
             java.util.UUID playerId = player.getUUID();
             ChunkPos currentPos = player.chunkPosition();
-            ChunkPos lastPos = lastPlayerPositions.get(playerId);
             ResourceKey<Level> currentDim = player.level().dimension();
             ResourceKey<Level> lastDim = lastPlayerDimensions.get(playerId);
             boolean dimensionChanged = lastDim != null && !lastDim.equals(currentDim);
-            boolean chunkChanged = lastPos == null || !lastPos.equals(currentPos);
 
-            if (chunkChanged || dimensionChanged) {
-                lastPlayerPositions.put(playerId, currentPos);
-                lastPlayerDimensions.put(playerId, currentDim);
-            }
-            if (lastPos == null || dimensionChanged || distSq(lastPos, currentPos) >= 4) {
+            lastPlayerPositions.put(playerId, currentPos);
+            lastPlayerDimensions.put(playerId, currentDim);
+
+            ChunkPos lastScanPos = lastScanPositions.get(playerId);
+            if (lastScanPos == null || dimensionChanged || distSq(lastScanPos, currentPos) >= 4) {
+                lastScanPositions.put(playerId, currentPos);
                 shouldRescan = true;
             }
         }
@@ -428,6 +518,7 @@ public final class ChunkGenerationManager {
         if (lastPlayerPositions.size() > currentPlayerIds.size()) {
             lastPlayerPositions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
             lastPlayerDimensions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
+            lastScanPositions.keySet().removeIf(uuid -> !currentPlayerIds.contains(uuid));
             shouldRescan = true;
         }
 
@@ -484,7 +575,9 @@ public final class ChunkGenerationManager {
             maxCounts.merge(state, missing, Math::max);
         }
         
-        maxCounts.forEach((state, count) -> state.remainingInRadius.set(count));
+        maxCounts.forEach((state, count) -> {
+            state.remainingInRadius.set(Math.max(0, count));
+        });
     }
 
     private void updateThrottleCapacity() {
@@ -523,7 +616,10 @@ public final class ChunkGenerationManager {
     
     private void cleanupTask(ServerLevel level, ChunkPos pos) {
         queueTicketRemove(level, pos);
-        ((MinecraftServerAccess) server).setEmptyTicks(0);
+        MinecraftServer srv = server;
+        if (srv != null) {
+            ((MinecraftServerAccess) srv).setEmptyTicks(0);
+        }
         DimensionState state = dimensionStates.get(level.dimension());
         if (state != null) completeTask(state, pos);
     }
@@ -533,7 +629,7 @@ public final class ChunkGenerationManager {
         if (state.completedChunks.add(key)) {
             stats.incrementCompleted();
             state.distanceGraph.markChunkCompleted(pos.x, pos.z);
-            state.remainingInRadius.decrementAndGet();
+            state.remainingInRadius.updateAndGet(v -> Math.max(0, v - 1));
         } else {
             stats.incrementSkipped();
             state.distanceGraph.markChunkCompleted(pos.x, pos.z);
